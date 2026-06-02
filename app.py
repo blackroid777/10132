@@ -1,103 +1,70 @@
-import streamlit as dict_import  # 내부 오류 방지용 기본 라이브러리
 import streamlit as st
-import pandas as pd
-import datetime
+import google.generativeai as genai
 
-# --- 페이지 설정 ---
-st.set_page_config(page_title="수행평가 일정 관리 플래너", page_icon="📅", layout="wide")
+# 1. 페이지 설정 및 제목
+st.set_page_config(page_title="풋볼 AI 버디", page_icon="⚽")
+st.title("⚽ 풋볼 AI 버디")
+st.caption("축구에 대한 모든 것! 전술, 선수, 역사 등 무엇이든 물어보세요.")
 
-# --- 세션 상태(데이터 저장소) 초기화 ---
-# 앱이 재실행되어도 데이터가 날아가지 않도록 유지합니다.
-if "events" not in st.session_state:
-    st.session_state.events = pd.DataFrame(
-        columns=["과목", "수행평가 내용", "마감일", "D-Day"]
+# 2. Streamlit Secrets에서 API 키 불러오기 및 설정
+try:
+    gemini_api_key = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=gemini_api_key)
+except KeyError:
+    st.error("⚠️ Streamlit Secrets에 'GEMINI_API_KEY'가 설정되지 않았습니다. 설정을 확인해주세요.")
+    st.stop()
+
+# 3. 세션 상태(Session State)로 채팅 기록 초기화
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+    # 챗봇에게 축구 전문가라는 페르소나 부여를 위한 시스템 지침 설정
+    st.session_state.system_instruction = (
+        "당신은 열정적이고 지식이 풍부한 축구 전문가입니다. "
+        "축구 관련 질문에만 친절하고 상세하게 답해주세요. "
+        "만약 축구와 전혀 상관없는 질문이 들어오면, 축구와 관련된 이야기로 자연스럽게 유도하거나 "
+        "축구 관련 질문만 답변할 수 있다고 정중하게 안내하세요."
     )
 
-st.title("📅 과목별 수행평가 일정 플래너")
-st.markdown("수행평가 일정을 기록하고, 달력과 리스트로 한눈에 확인하세요!")
+# 4. 기존 채팅 기록 화면에 표시
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-# --- 레이아웃 분할 (좌측: 입력 창 / 우측: 달력 및 리스트) ---
-col1, col2 = st.columns([1, 2])
-
-# --- [좌측] 수행평가 일정 입력 섹션 ---
-with col1:
-    st.header("📝 새 일정 등록")
+# 5. 사용자 입력 받기
+if user_input := st.chat_input("메시지를 입력하세요 (예: 오프사이드 규칙이 뭐야?, 벵거 볼의 특징은?)"):
     
-    with st.form(key="event_form", clear_on_submit=True):
-        subject = st.selectbox(
-            "과목 선택",
-            ["국어", "수학", "영어", "한국사", "과학탐구", "사회탐구", "제2외국어", "기타"]
-        )
-        content = st.text_input("수행평가 내용", placeholder="예: 과학 실험 보고서 제출")
-        due_date = st.date_input("마감일 선택", datetime.date.today())
-        
-        submit_button = st.form_submit_button(label="일정 추가하기")
-        
-        if submit_button:
-            if content.strip() == "":
-                st.error("수행평가 내용을 입력해주세요!")
-            else:
-                # 새로운 일정 데이터 생성
-                new_event = pd.DataFrame([{
-                    "과목": subject,
-                    "수행평가 내용": content,
-                    "마감일": due_date,
-                    "D-Day": "" # 하단에서 계산
-                }])
-                
-                # 기존 데이터에 추가
-                st.session_state.events = pd.concat([st.session_state.events, new_event], ignore_index=True)
-                st.success(f"'{subject}' 수행평가 일정이 추가되었습니다!")
+    # 사용자 메시지 화면 표시 및 저장
+    with st.chat_message("user"):
+        st.markdown(user_input)
+    st.session_state.messages.append({"role": "user", "content": user_input})
 
-# --- 데이터 가공 (D-Day 계산 및 정렬) ---
-df = st.session_state.events.copy()
-if not df.empty:
-    # 날짜 형식 정렬을 위해 datetime 타입으로 변환
-    df["마감일"] = pd.to_datetime(df["마감일"]).dt.date
-    today = datetime.date.today()
-    
-    # D-Day 계산 라이직
-    def calculate_dday(date):
-        delta = (date - today).days
-        if delta == 0:
-            return "🔥 D-Day"
-        elif delta < 0:
-            return f"✅ 완료 ({abs(delta)}일 지남)"
-        else:
-            return f"⏳ D-{delta}"
+    # AI 답변 생성 및 화면 표시
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        
+        try:
+            # gemini-2.5-flash-lite 모델 설정
+            model = genai.GenerativeModel(
+                model_name="gemini-2.5-flash-lite",
+                system_instruction=st.session_state.system_instruction
+            )
             
-    df["D-Day"] = df["마감일"].apply(calculate_dday)
-    df = df.sort_values(by="마감일") # 날짜순 정렬
-
-# --- [우측] 달력 및 일정 확인 섹션 ---
-with col2:
-    st.header("🗓️ 이번 달 일정 보기")
-    
-    # 1. 스트림릿 기본 달력 뷰 (st.date_input 활용)
-    # 현재 등록된 마감일들을 달력에 점이나 하이라이트로 보여주는 대안으로, 
-    # 날짜를 선택하면 해당 날짜의 일정을 필터링해 보여주는 스마트 달력 기능을 구현했습니다.
-    
-    selected_date = st.date_input("🗓️ 날짜를 선택하면 해당 날짜의 수행평가를 보여줍니다.", datetime.date.today())
-    
-    # 2. 전체 일정 표 및 필터링
-    st.header("📋 전체 수행평가 리스트")
-    
-    if df.empty:
-        st.info("등록된 수행평가 일정이 없습니다. 좌측에서 첫 일정을 등록해보세요!")
-    else:
-        # 선택한 날짜 필터링 보여주기
-        filtered_df = df[df["마감일"] == selected_date]
-        if not filtered_df.empty:
-            st.markdown(f"#### 🔍 {selected_date} 선택된 날짜의 일정")
-            st.dataframe(filtered_df, use_container_width=True)
-            st.markdown("---")
+            # 이전 대화 기록을 Gemini API 형식에 맞게 변환 (role 변환 포함)
+            history = []
+            for msg in st.session_state.messages[:-1]:  # 현재 입력 직전까지의 기록
+                role = "user" if msg["role"] == "user" else "model"
+                history.append({"role": role, "parts": [msg["content"]]})
             
-        # 전체 테이블 출력
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        
-        # 일정 삭제 기능
-        st.markdown("### 🗑️ 일정 삭제")
-        delete_target = st.selectbox("삭제할 일정을 선택하세요", df["수행평가 내용"].unique())
-        if st.button("선택한 일정 삭제"):
-            st.session_state.events = st.session_state.events[st.session_state.events["수행평가 내용"] != delete_target]
-            st.rerun()
+            # 채팅 세션 시작 및 답변 요청
+            chat = model.start_chat(history=history)
+            response = chat.send_message(user_input)
+            
+            # 답변 출력 및 세션 저장
+            ai_response = response.text
+            message_placeholder.markdown(ai_response)
+            st.session_state.messages.append({"role": "assistant", "content": ai_response})
+            
+        except genai.types.generation_types.APIError as e:
+            st.error(f"❌ Google Gemini API 오류가 발생했습니다: {e}")
+        except Exception as e:
+            st.error(f"❌ 예상치 못한 오류가 발생했습니다: {e}")
